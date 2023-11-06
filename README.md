@@ -3,6 +3,9 @@
 **Description:**
 The GIF to WebM Converter plugin simplifies the process of converting GIF files to high-quality WebM videos for seamless integration into your WordPress website. With this user-friendly tool, you can effortlessly transform animated GIFs into WebM format, enhancing your site's performance and reducing file sizes.
 
+**GIF to WebM Conversion Tool:**
+[ezgif.com/gif-to-webm](https://ezgif.com/gif-to-webm) *(Free to use)*
+
 **Key Features:**
 
 - **Effortless Conversion:** Easily convert GIF files to WebM format with just a few clicks, ensuring smooth playback and improved website performance.
@@ -20,4 +23,24 @@ The GIF to WebM Converter plugin simplifies the process of converting GIF files 
 3. **Embed WebM Videos:** Insert the generated shortcodes into your posts, pages, or widgets to display the converted WebM videos seamlessly.
 4. **Monitor Performance:** Enjoy improved website performance and user experience as your animated content loads smoothly across all devices.
 
-Upgrade your website's multimedia experience with the GIF to WebM Converter plugin. Convert, customize, and captivate your audience with visually appealing WebM videos, enhancing your WordPress site's overall appeal and functionality.
+**Customize Styles:**
+
+You can customize the appearance of your WebM videos using the following CSS classes:
+
+- **Container DIV Class:** `.bannerVideo`
+- **Video/GIF Classes:** `.bannerGif`
+
+**Example CSS to Center Videos/GIFs:**
+
+```css
+.bannerVideo {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+
+.bannerGif {
+    max-width: 100%;
+    max-height: 100%;
+}
