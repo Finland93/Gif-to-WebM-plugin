@@ -120,7 +120,7 @@ function gif_webm_shortcodes_page() {
 function gif_webm_enqueue_scripts() {
     ?>
     <script>
-        document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function() {
     var webmVideo = document.getElementById('webmVideo');
     var gifFallback = document.getElementById('gifFallback');
 
@@ -134,6 +134,9 @@ function gif_webm_enqueue_scripts() {
             webmVideo.style.display = 'none';
             gifFallback.style.display = 'block';
         };
+        
+        // Check if the browser supports WebM
+        webmVideo.canPlayType('video/webm') === 'probably' || webmVideo.canPlayType('video/webm') === 'maybe' ? webmVideo.load() : webmVideo.onerror();
     }
 });
     </script>
