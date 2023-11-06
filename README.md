@@ -37,7 +37,6 @@ You can customize the appearance of your WebM videos using the following CSS cla
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100vh;
 }
 
 .bannerGif {
