@@ -2,189 +2,429 @@
 /*
 Plugin Name: Gif to WebM plugin
 Plugin URI: https://github.com/Finland93/Gif-to-WebM-plugin
-Description: Convert GIF to WebM and display as a shortcode.
-Version: 1.0
+Description: Store GIF + WebM pairs and output them as a lightweight, autoplaying WebM video with an automatic GIF fallback, via a simple shortcode.
+Version: 2.0.0
 Author: Finland93
 Author URI: https://github.com/Finland93
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: gif-to-webm-plugin
 */
 
-// Exit if directly accessed
-if (!defined('ABSPATH')) {
-    exit; 
+// Exit if directly accessed.
+if ( ! defined( 'ABSPATH' ) ) {
+	exit;
 }
 
-// Create menu page for managing shortcodes
-function gif_webm_menu_page() {
-    add_menu_page('GIF to WEBM Shortcodes', 'GIF to WEBM', 'manage_options', 'gif-webm-shortcodes', 'gif_webm_shortcodes_page');
+define( 'GIF_WEBM_VERSION', '2.0.0' );
+define( 'GIF_WEBM_FILE', __FILE__ );
+define( 'GIF_WEBM_URL', plugin_dir_url( __FILE__ ) );
+
+final class Gif_To_WebM {
+
+	const CPT       = 'gif_webm_shortcode';
+	const MENU_SLUG = 'gif-webm-shortcodes';
+
+	private static $instance = null;
+	private $page_hook       = '';
+
+	public static function instance() {
+		if ( null === self::$instance ) {
+			self::$instance = new self();
+		}
+		return self::$instance;
+	}
+
+	private function __construct() {
+		add_action( 'init', array( $this, 'register_cpt' ) );
+		add_action( 'init', array( $this, 'load_textdomain' ) );
+
+		add_action( 'admin_menu', array( $this, 'admin_menu' ) );
+		add_action( 'admin_enqueue_scripts', array( $this, 'admin_assets' ) );
+
+		// Register (but don't enqueue) the front-end fallback script; the
+		// shortcode enqueues it on demand so it only loads where it's needed.
+		add_action( 'wp_enqueue_scripts', array( $this, 'register_frontend_assets' ) );
+
+		add_shortcode( 'gif-video', array( $this, 'render_shortcode' ) );
+	}
+
+	public function load_textdomain() {
+		load_plugin_textdomain( 'gif-to-webm-plugin', false, dirname( plugin_basename( GIF_WEBM_FILE ) ) . '/languages' );
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Storage (custom post type, hidden from the UI)
+	 * ------------------------------------------------------------------- */
+
+	public function register_cpt() {
+		register_post_type(
+			self::CPT,
+			array(
+				'labels'              => array(
+					'name'          => __( 'GIF to WebM Shortcodes', 'gif-to-webm-plugin' ),
+					'singular_name' => __( 'GIF to WebM Shortcode', 'gif-to-webm-plugin' ),
+				),
+				'public'              => false,
+				'show_ui'             => false,
+				'exclude_from_search' => true,
+				'has_archive'         => false,
+				'rewrite'             => false,
+				'capability_type'     => 'post',
+			)
+		);
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Admin
+	 * ------------------------------------------------------------------- */
+
+	public function admin_menu() {
+		$this->page_hook = add_menu_page(
+			__( 'GIF to WEBM Shortcodes', 'gif-to-webm-plugin' ),
+			__( 'GIF to WEBM', 'gif-to-webm-plugin' ),
+			'manage_options',
+			self::MENU_SLUG,
+			array( $this, 'render_admin_page' ),
+			'dashicons-format-video'
+		);
+
+		// Process create/edit/delete BEFORE any HTML is sent, so PRG redirects
+		// work cleanly (no "headers already sent").
+		add_action( 'load-' . $this->page_hook, array( $this, 'handle_actions' ) );
+	}
+
+	public function admin_assets( $hook ) {
+		if ( $hook !== $this->page_hook ) {
+			return;
+		}
+		wp_enqueue_style( 'gif-webm-admin', GIF_WEBM_URL . 'assets/admin.css', array(), GIF_WEBM_VERSION );
+	}
+
+	private function page_url() {
+		return menu_page_url( self::MENU_SLUG, false );
+	}
+
+	/** All mutating actions happen here, before output. */
+	public function handle_actions() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+
+		// ---- Create or update ----
+		if ( isset( $_POST['gif_webm_submit'] ) ) {
+			check_admin_referer( 'gif_webm_save', 'gif_webm_nonce' );
+
+			$entry_id = absint( $_POST['entry_id'] ?? 0 );
+			$fields   = array(
+				'_gif_webm_gif_url'         => esc_url_raw( wp_unslash( $_POST['gif_url'] ?? '' ) ),
+				'_gif_webm_webm_url'        => esc_url_raw( wp_unslash( $_POST['webm_url'] ?? '' ) ),
+				'_gif_webm_video_width'     => absint( $_POST['video_width'] ?? 0 ),
+				'_gif_webm_video_height'    => absint( $_POST['video_height'] ?? 0 ),
+				'_gif_webm_affiliate_link'  => esc_url_raw( wp_unslash( $_POST['affiliate_link'] ?? '' ) ),
+				'_gif_webm_affiliate_title' => sanitize_text_field( wp_unslash( $_POST['affiliate_title'] ?? '' ) ),
+			);
+
+			// Need at least one media URL.
+			if ( '' === $fields['_gif_webm_gif_url'] && '' === $fields['_gif_webm_webm_url'] ) {
+				wp_safe_redirect( add_query_arg( 'msg', 'nomedia', $this->page_url() ) );
+				exit;
+			}
+
+			// Update an existing entry, or create a new one.
+			if ( $entry_id ) {
+				$post = get_post( $entry_id );
+				if ( ! $post || self::CPT !== $post->post_type ) {
+					$entry_id = 0;
+				}
+			}
+
+			if ( ! $entry_id ) {
+				$entry_id = wp_insert_post(
+					array(
+						'post_title'  => 'GIF to WebM',
+						'post_status' => 'publish',
+						'post_type'   => self::CPT,
+					),
+					true
+				);
+			}
+
+			if ( is_wp_error( $entry_id ) || ! $entry_id ) {
+				wp_safe_redirect( add_query_arg( 'msg', 'error', $this->page_url() ) );
+				exit;
+			}
+
+			foreach ( $fields as $key => $value ) {
+				update_post_meta( $entry_id, $key, $value );
+			}
+
+			// Now that we have the real ID, store a correct title + shortcode.
+			// (The 1.0 bug saved an empty id here because $shortcode_id was used
+			// before wp_insert_post() had returned it.)
+			wp_update_post(
+				array(
+					'ID'           => $entry_id,
+					'post_title'   => 'GIF to WebM #' . $entry_id,
+					'post_content' => "[gif-video id='" . $entry_id . "']",
+				)
+			);
+
+			wp_safe_redirect( add_query_arg( 'msg', 'saved', $this->page_url() ) );
+			exit;
+		}
+
+		// ---- Delete (nonce-protected; 1.0 deleted via an unprotected GET link) ----
+		if ( isset( $_GET['action'], $_GET['id'] ) && 'delete' === $_GET['action'] ) {
+			$id = absint( $_GET['id'] );
+			check_admin_referer( 'gif_webm_delete_' . $id );
+			if ( $id ) {
+				$post = get_post( $id );
+				if ( $post && self::CPT === $post->post_type ) {
+					wp_delete_post( $id, true );
+				}
+			}
+			wp_safe_redirect( add_query_arg( 'msg', 'deleted', $this->page_url() ) );
+			exit;
+		}
+	}
+
+	public function render_admin_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'You do not have permission to access this page.', 'gif-to-webm-plugin' ) );
+		}
+
+		// Notices.
+		$msg = isset( $_GET['msg'] ) ? sanitize_key( $_GET['msg'] ) : '';
+		$map = array(
+			'saved'   => array( 'success', __( 'Shortcode saved.', 'gif-to-webm-plugin' ) ),
+			'deleted' => array( 'success', __( 'Shortcode deleted.', 'gif-to-webm-plugin' ) ),
+			'nomedia' => array( 'error', __( 'Please provide at least a WebM or a GIF URL.', 'gif-to-webm-plugin' ) ),
+			'error'   => array( 'error', __( 'Could not save the shortcode.', 'gif-to-webm-plugin' ) ),
+		);
+		if ( isset( $map[ $msg ] ) ) {
+			printf( '<div class="notice notice-%1$s is-dismissible"><p>%2$s</p></div>', esc_attr( $map[ $msg ][0] ), esc_html( $map[ $msg ][1] ) );
+		}
+
+		// Are we editing an existing entry?
+		$edit_id = 0;
+		$edit    = array(
+			'gif_url'         => '',
+			'webm_url'        => '',
+			'video_width'     => '',
+			'video_height'    => '',
+			'affiliate_link'  => '',
+			'affiliate_title' => '',
+		);
+		if ( isset( $_GET['action'], $_GET['id'] ) && 'edit' === $_GET['action'] ) {
+			$edit_id = absint( $_GET['id'] );
+			$post    = get_post( $edit_id );
+			if ( $post && self::CPT === $post->post_type ) {
+				$edit['gif_url']         = get_post_meta( $edit_id, '_gif_webm_gif_url', true );
+				$edit['webm_url']        = get_post_meta( $edit_id, '_gif_webm_webm_url', true );
+				$edit['video_width']     = get_post_meta( $edit_id, '_gif_webm_video_width', true );
+				$edit['video_height']    = get_post_meta( $edit_id, '_gif_webm_video_height', true );
+				$edit['affiliate_link']  = get_post_meta( $edit_id, '_gif_webm_affiliate_link', true );
+				$edit['affiliate_title'] = get_post_meta( $edit_id, '_gif_webm_affiliate_title', true );
+			} else {
+				$edit_id = 0;
+			}
+		}
+		?>
+		<div class="wrap gif-webm-admin">
+			<h1><?php esc_html_e( 'GIF to WebM Shortcodes', 'gif-to-webm-plugin' ); ?></h1>
+
+			<div class="gif-webm-help">
+				<p><strong><?php esc_html_e( 'How it works:', 'gif-to-webm-plugin' ); ?></strong>
+					<?php esc_html_e( 'Upload your GIF and a converted WebM to the Media Library, paste both URLs below, and place the generated shortcode in any post or page. Visitors get the small WebM video, falling back to the GIF automatically if WebM can\'t play.', 'gif-to-webm-plugin' ); ?>
+					<a href="https://ezgif.com/gif-to-webm" target="_blank" rel="noopener"><?php esc_html_e( 'Free GIF→WebM converter', 'gif-to-webm-plugin' ); ?></a>.
+				</p>
+				<p><strong><?php esc_html_e( 'Styling:', 'gif-to-webm-plugin' ); ?></strong>
+					<?php
+					printf(
+						/* translators: 1: container CSS class, 2: media CSS class */
+						esc_html__( 'Container: %1$s — video/image: %2$s', 'gif-to-webm-plugin' ),
+						'<code>.bannerVideo</code>',
+						'<code>.bannerGif</code>'
+					);
+					?>
+				</p>
+			</div>
+
+			<h2><?php echo $edit_id ? esc_html__( 'Edit shortcode', 'gif-to-webm-plugin' ) : esc_html__( 'Add new shortcode', 'gif-to-webm-plugin' ); ?></h2>
+			<form method="post" action="">
+				<?php wp_nonce_field( 'gif_webm_save', 'gif_webm_nonce' ); ?>
+				<input type="hidden" name="entry_id" value="<?php echo esc_attr( $edit_id ); ?>">
+				<table class="form-table" role="presentation">
+					<tr>
+						<th scope="row"><label for="webm_url"><?php esc_html_e( 'WebM URL', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="url" id="webm_url" name="webm_url" value="<?php echo esc_attr( $edit['webm_url'] ); ?>" class="regular-text" placeholder="https://…/animation.webm"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="gif_url"><?php esc_html_e( 'GIF URL (fallback)', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="url" id="gif_url" name="gif_url" value="<?php echo esc_attr( $edit['gif_url'] ); ?>" class="regular-text" placeholder="https://…/animation.gif"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="video_width"><?php esc_html_e( 'Width (px)', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="number" min="0" step="1" id="video_width" name="video_width" value="<?php echo esc_attr( $edit['video_width'] ); ?>" class="small-text"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="video_height"><?php esc_html_e( 'Height (px)', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="number" min="0" step="1" id="video_height" name="video_height" value="<?php echo esc_attr( $edit['video_height'] ); ?>" class="small-text"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="affiliate_link"><?php esc_html_e( 'Link URL (optional)', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="url" id="affiliate_link" name="affiliate_link" value="<?php echo esc_attr( $edit['affiliate_link'] ); ?>" class="regular-text" placeholder="https://…"></td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="affiliate_title"><?php esc_html_e( 'Link / alt text (optional)', 'gif-to-webm-plugin' ); ?></label></th>
+						<td><input type="text" id="affiliate_title" name="affiliate_title" value="<?php echo esc_attr( $edit['affiliate_title'] ); ?>" class="regular-text"></td>
+					</tr>
+				</table>
+				<?php submit_button( $edit_id ? __( 'Update Shortcode', 'gif-to-webm-plugin' ) : __( 'Add Shortcode', 'gif-to-webm-plugin' ), 'primary', 'gif_webm_submit' ); ?>
+				<?php if ( $edit_id ) : ?>
+					<a href="<?php echo esc_url( $this->page_url() ); ?>" class="button"><?php esc_html_e( 'Cancel', 'gif-to-webm-plugin' ); ?></a>
+				<?php endif; ?>
+			</form>
+
+			<hr>
+			<h2><?php esc_html_e( 'Existing shortcodes', 'gif-to-webm-plugin' ); ?></h2>
+			<?php
+			$entries = get_posts(
+				array(
+					'post_type'      => self::CPT,
+					'posts_per_page' => 100,
+					'orderby'        => 'ID',
+					'order'          => 'DESC',
+				)
+			);
+
+			if ( ! $entries ) {
+				echo '<p>' . esc_html__( 'No shortcodes yet.', 'gif-to-webm-plugin' ) . '</p>';
+			} else {
+				echo '<table class="wp-list-table widefat fixed striped">';
+				echo '<thead><tr>';
+				echo '<th>' . esc_html__( 'Preview', 'gif-to-webm-plugin' ) . '</th>';
+				echo '<th>' . esc_html__( 'Shortcode', 'gif-to-webm-plugin' ) . '</th>';
+				echo '<th>' . esc_html__( 'Actions', 'gif-to-webm-plugin' ) . '</th>';
+				echo '</tr></thead><tbody>';
+
+				foreach ( $entries as $entry ) {
+					$id       = $entry->ID;
+					$gif      = get_post_meta( $id, '_gif_webm_gif_url', true );
+					$webm     = get_post_meta( $id, '_gif_webm_webm_url', true );
+					$preview  = $gif ? $gif : '';
+					$edit_url = add_query_arg(
+						array(
+							'page'   => self::MENU_SLUG,
+							'action' => 'edit',
+							'id'     => $id,
+						),
+						admin_url( 'admin.php' )
+					);
+					$del_url  = wp_nonce_url(
+						add_query_arg(
+							array(
+								'page'   => self::MENU_SLUG,
+								'action' => 'delete',
+								'id'     => $id,
+							),
+							admin_url( 'admin.php' )
+						),
+						'gif_webm_delete_' . $id
+					);
+
+					echo '<tr>';
+					echo '<td>';
+					if ( $preview ) {
+						echo '<img src="' . esc_url( $preview ) . '" alt="" style="max-width:80px;max-height:60px;height:auto;">';
+					} elseif ( $webm ) {
+						echo '<span class="dashicons dashicons-format-video"></span>';
+					}
+					echo '</td>';
+					echo '<td><input type="text" readonly class="code" style="width:100%;max-width:220px;" value="' . esc_attr( "[gif-video id='" . $id . "']" ) . '" onclick="this.select();"></td>';
+					echo '<td>';
+					echo '<a href="' . esc_url( $edit_url ) . '" class="button button-small">' . esc_html__( 'Edit', 'gif-to-webm-plugin' ) . '</a> ';
+					echo '<a href="' . esc_url( $del_url ) . '" class="button button-small button-link-delete" onclick="return confirm(\'' . esc_js( __( 'Delete this shortcode?', 'gif-to-webm-plugin' ) ) . '\');">' . esc_html__( 'Delete', 'gif-to-webm-plugin' ) . '</a>';
+					echo '</td>';
+					echo '</tr>';
+				}
+				echo '</tbody></table>';
+			}
+			?>
+		</div>
+		<?php
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Front-end
+	 * ------------------------------------------------------------------- */
+
+	public function register_frontend_assets() {
+		wp_register_script(
+			'gif-webm-fallback',
+			GIF_WEBM_URL . 'assets/gif-webm-fallback.js',
+			array(),
+			GIF_WEBM_VERSION,
+			true
+		);
+	}
+
+	public function render_shortcode( $atts ) {
+		$atts = shortcode_atts( array( 'id' => '' ), $atts, 'gif-video' );
+		$id   = absint( $atts['id'] );
+		if ( ! $id ) {
+			return '';
+		}
+
+		$post = get_post( $id );
+		if ( ! $post || self::CPT !== $post->post_type ) {
+			return '';
+		}
+
+		$gif   = get_post_meta( $id, '_gif_webm_gif_url', true );
+		$webm  = get_post_meta( $id, '_gif_webm_webm_url', true );
+		$w     = absint( get_post_meta( $id, '_gif_webm_video_width', true ) );
+		$h     = absint( get_post_meta( $id, '_gif_webm_video_height', true ) );
+		$link  = get_post_meta( $id, '_gif_webm_affiliate_link', true );
+		$title = get_post_meta( $id, '_gif_webm_affiliate_title', true );
+
+		if ( ! $webm && ! $gif ) {
+			return '';
+		}
+
+		// Only load the fallback script when WebM is present (it's pointless for
+		// a GIF-only entry).
+		if ( $webm ) {
+			wp_enqueue_script( 'gif-webm-fallback' );
+		}
+
+		$dim = '';
+		if ( $w ) {
+			$dim .= ' width="' . esc_attr( $w ) . '"';
+		}
+		if ( $h ) {
+			$dim .= ' height="' . esc_attr( $h ) . '"';
+		}
+
+		$media = '';
+		if ( $webm ) {
+			$media .= '<video class="bannerGif" autoplay loop muted playsinline preload="metadata"' . $dim . '>';
+			$media .= '<source src="' . esc_url( $webm ) . '" type="video/webm">';
+			$media .= '</video>';
+		}
+		if ( $gif ) {
+			$style  = $webm ? ' style="display:none"' : '';
+			$media .= '<img class="bannerGif" src="' . esc_url( $gif ) . '" alt="' . esc_attr( $title ) . '" loading="lazy" decoding="async"' . $dim . $style . '>';
+		}
+
+		if ( $link ) {
+			$title_attr = $title ? ' title="' . esc_attr( $title ) . '"' : '';
+			$media      = '<a href="' . esc_url( $link ) . '" rel="sponsored nofollow noopener" target="_blank"' . $title_attr . '>' . $media . '</a>';
+		}
+
+		return '<div class="bannerVideo gif-webm">' . $media . '</div>';
+	}
 }
-add_action('admin_menu', 'gif_webm_menu_page');
 
-function gif_webm_shortcodes_page() {
-    // Handle form submission for shortcode creation
-    if (isset($_POST['submit'])) {
-        $gif_url = esc_url($_POST['gif_url']);
-        $webm_url = esc_url($_POST['webm_url']);
-        $video_width = intval($_POST['video_width']);
-        $video_height = intval($_POST['video_height']);
-        $affiliate_link = esc_url($_POST['affiliate_link']);
-        $affiliate_title = sanitize_text_field($_POST['affiliate_title']);
-        
-        // Generate the shortcode
-        $shortcode = "[gif-video id='$shortcode_id']";
-        
-        // Save the shortcode to the database
-        $post_data = array(
-            'post_title'    => 'GIF to WEBM Shortcode',
-            'post_content'  => $shortcode,
-            'post_status'   => 'publish',
-            'post_type'     => 'gif_webm_shortcode',
-        );
-        
-        $shortcode_id = wp_insert_post($post_data);
-
-        // Save meta data
-        update_post_meta($shortcode_id, '_gif_webm_gif_url', $gif_url);
-        update_post_meta($shortcode_id, '_gif_webm_webm_url', $webm_url);
-        update_post_meta($shortcode_id, '_gif_webm_video_width', $video_width);
-        update_post_meta($shortcode_id, '_gif_webm_video_height', $video_height);
-        update_post_meta($shortcode_id, '_gif_webm_affiliate_link', $affiliate_link);
-        update_post_meta($shortcode_id, '_gif_webm_affiliate_title', $affiliate_title);
-
-        echo "<div class='updated'><p>Shortcode has been generated and saved!</p></div>";
-    }
-
-    // Handle shortcode removal
-    if (isset($_GET['delete'])) {
-        $shortcode_id = intval($_GET['delete']);
-        wp_delete_post($shortcode_id, true);
-        echo "<div class='updated'><p>Shortcode has been deleted!</p></div>";
-    }
-
-    // Display form for adding GIF to WEBM shortcode
-    ?>
-    <div class="wrap">
-    <h2 style="margin-bottom: 20px;">GIF to WEBM Shortcodes</h2>
-    <div style="margin-bottom: 20px;">
-        <p><strong>Usage:</strong> You need to upload GIF and WebM files to your media library, then use URLs for these 2 files. You can convert GIF to WebM with this <a href="https://ezgif.com/gif-to-webm/ezgif-2-abd622135b.gif" title="EZgif conversion tool">free online tool</a>.</p>
-        <p><strong>Styles:</strong> CSS class for video container (DIV): <code>.bannerVideo</code> and for video/GIF output: <code>.bannerGif</code></p>
-    </div>
-    <form method="post" action="">
-        <label for="gif_url">GIF URL:</label>
-        <input type="text" id="gif_url" name="gif_url" required class="regular-text"><br><br>
-
-        <label for="webm_url">WEBM URL:</label>
-        <input type="text" id="webm_url" name="webm_url" required class="regular-text"><br><br>
-
-        <label for="video_width">Video Width:</label>
-        <input type="text" id="video_width" name="video_width" required class="small-text"><br><br>
-
-        <label for="video_height">Video Height:</label>
-        <input type="text" id="video_height" name="video_height" required class="small-text"><br><br>
-
-        <label for="affiliate_link">Affiliate Link:</label>
-        <input type="text" id="affiliate_link" name="affiliate_link" required class="regular-text"><br><br>
-
-        <label for="affiliate_title">Affiliate Link Title:</label>
-        <input type="text" id="affiliate_title" name="affiliate_title" required class="regular-text"><br><br>
-
-        <input type="submit" name="submit" class="button button-primary" value="Generate Shortcode">
-    </form>
-    <p><strong>Shortcode usage:</strong> Please use this: <code>[gif-video id='1']</code> and change the video ID to the correct one below.</p>
-
-    <?php
-    // Display list of existing shortcodes
-    $shortcodes = get_posts(array(
-        'post_type' => 'gif_webm_shortcode',
-        'posts_per_page' => -1,
-    ));
-
-    if ($shortcodes) {
-        echo '<h2>Existing Shortcodes</h2>';
-        echo '<ul>';
-        foreach ($shortcodes as $shortcode) {
-            $shortcode_id = $shortcode->ID;
-            $gif_url = get_post_meta($shortcode_id, '_gif_webm_gif_url', true);
-            echo '<li>ID: ' . $shortcode_id . ', GIF URL: ' . esc_url($gif_url) . ' <a href="?page=gif-webm-shortcodes&delete=' . $shortcode_id . '">Delete</a></li>';
-        }
-        echo '</ul>';
-    }
-    ?>
-</div>
-
-    <?php
-}
-
-// Enqueue JavaScript in the footer
-function gif_webm_enqueue_scripts() {
-    ?>
-    <script>
-document.addEventListener('DOMContentLoaded', function() {
-    var webmVideo = document.getElementById('webmVideo');
-    var gifFallback = document.getElementById('gifFallback');
-
-    if (webmVideo && gifFallback) {
-        webmVideo.oncanplaythrough = function() {
-            webmVideo.style.display = 'block';
-            gifFallback.style.display = 'none';
-        };
-
-        webmVideo.onerror = function() {
-            webmVideo.style.display = 'none';
-            gifFallback.style.display = 'block';
-        };
-        
-        // Check if the browser supports WebM
-        webmVideo.canPlayType('video/webm') === 'probably' || webmVideo.canPlayType('video/webm') === 'maybe' ? webmVideo.load() : webmVideo.onerror();
-    }
-});
-    </script>
-    <?php
-}
-
-add_action('wp_footer', 'gif_webm_enqueue_scripts');
-
-// Custom shortcode handling
-function gif_webm_shortcode($atts) {
-    $atts = shortcode_atts(array(
-        'id' => '',
-    ), $atts);
-
-    $shortcode_id = intval($atts['id']);
-    $gif_url = get_post_meta($shortcode_id, '_gif_webm_gif_url', true);
-    $webm_url = get_post_meta($shortcode_id, '_gif_webm_webm_url', true);
-    $video_width = get_post_meta($shortcode_id, '_gif_webm_video_width', true);
-    $video_height = get_post_meta($shortcode_id, '_gif_webm_video_height', true);
-    $affiliate_link = get_post_meta($shortcode_id, '_gif_webm_affiliate_link', true);
-    $affiliate_title = get_post_meta($shortcode_id, '_gif_webm_affiliate_title', true);
-
-    if ($gif_url && $webm_url && $video_width && $video_height) {
-        $output = '<div class="bannerVideo">';
-        $output .= '<a href="' . esc_url($affiliate_link) . '" rel="sponsored nofollow" title="' . esc_attr($affiliate_title) . '">';
-        $output .= '<video autoplay loop muted class="bannerGif" width="' . esc_attr($video_width) . '" height="' . esc_attr($video_height) . '">';
-        $output .= '<source src="' . esc_url($webm_url) . '" type="video/webm">';
-        $output .= '</video>';
-        $output .= '<img class="bannerGif" src="' . esc_url($gif_url) . '" alt="' . esc_attr($affiliate_title) . '" width="' . esc_attr($video_width) . '" height="' . esc_attr($video_height) . '" style="display: none;">';
-        $output .= '</a>';
-        $output .= '</div>';
-
-        return $output;
-    } else {
-        return 'Invalid or missing shortcode ID or meta data'; 
-    }
-}
-add_shortcode('gif-video', 'gif_webm_shortcode');
-
-// Register custom post type for managing shortcodes
-function gif_webm_register_shortcode_post_type() {
-    register_post_type('gif_webm_shortcode', array(
-        'labels' => array(
-            'name' => 'GIF to WEBM Shortcodes',
-            'singular_name' => 'GIF to WEBM Shortcode',
-        ),
-        'public' => false,
-        'show_ui' => false,
-    ));
-}
-add_action('init', 'gif_webm_register_shortcode_post_type');
+Gif_To_WebM::instance();

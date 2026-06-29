@@ -1,45 +1,38 @@
-## GIF to WebM Converter
+# GIF to WebM — WordPress Plugin
 
-**Description:**
-The GIF to WebM Converter plugin simplifies the process of converting GIF files to high-quality WebM videos for seamless integration into your WordPress website. With this user-friendly tool, you can effortlessly transform animated GIFs into WebM format, enhancing your site's performance and reducing file sizes.
+Store GIF + WebM pairs and output them with a simple shortcode as a lightweight, autoplaying **WebM video** that automatically **falls back to the GIF** if WebM can't play. WebM is typically a fraction of a GIF's size, so this speeds up pages while keeping the animation everywhere.
 
-**GIF to WebM Conversion Tool:**
-[ezgif.com/gif-to-webm](https://ezgif.com/gif-to-webm) *(Free to use)*
+## How to use
 
-**Key Features:**
+1. Convert your GIF to WebM (e.g. with the free [ezgif.com/gif-to-webm](https://ezgif.com/gif-to-webm)).
+2. Upload **both** the GIF and the WebM to your Media Library.
+3. Go to **GIF to WEBM** in the admin menu, paste both URLs (plus optional size and link), and save.
+4. Copy the generated shortcode — e.g. `[gif-video id='12']` — into any post or page.
 
-- **Effortless Conversion:** Easily convert GIF files to WebM format with just a few clicks, ensuring smooth playback and improved website performance.
-- **Media Library Integration:** Utilize your WordPress media library to store both GIF and WebM files, streamlining the management of your multimedia content.
-- **Customizable Shortcodes:** Generate customizable shortcodes for each WebM video, allowing you to control the display dimensions, affiliate links, and titles associated with your animated content.
-- **Affiliate Marketing:** Seamlessly incorporate affiliate links into your WebM videos, promoting products and services while providing engaging visual content to your audience.
-- **Responsive Design:** Ensure your converted WebM videos adapt to various screen sizes, providing a seamless viewing experience on desktops, tablets, and smartphones.
-- **Easy Integration:** Integrate WebM videos into your WordPress posts, pages, and widgets effortlessly, enhancing your website's multimedia capabilities.
-- **Enhanced Performance:** By converting GIFs to WebM format, reduce file sizes and improve page loading times, optimizing the overall performance of your WordPress website.
+## Styling
 
-**How to Use:**
-
-1. **Upload GIF and WebM Files:** Upload your GIF and WebM files to the WordPress media library.
-2. **Generate Shortcodes:** Use the plugin interface to generate unique shortcodes for each WebM video, specifying dimensions, affiliate links, and titles.
-3. **Embed WebM Videos:** Insert the generated shortcodes into your posts, pages, or widgets to display the converted WebM videos seamlessly.
-4. **Monitor Performance:** Enjoy improved website performance and user experience as your animated content loads smoothly across all devices.
-
-**Customize Styles:**
-
-You can customize the appearance of your WebM videos using the following CSS classes:
-
-- **Container DIV Class:** `.bannerVideo`
-- **Video/GIF Classes:** `.bannerGif`
-
-**Example CSS to Center Videos/GIFs:**
+| Element | CSS class |
+| --- | --- |
+| Container `<div>` | `.bannerVideo` |
+| Video / image | `.bannerGif` |
 
 ```css
-.bannerVideo {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
+.bannerVideo { display: flex; justify-content: center; }
+.bannerGif   { max-width: 100%; height: auto; }
+```
 
-.bannerGif {
-    max-width: 100%;
-    max-height: 100%;
-}
+## What changed in 2.0.0
+
+The 1.0 version had three real bugs; all are fixed:
+
+- **Saved shortcode was always empty** — `$shortcode_id` was used to build the shortcode string *before* `wp_insert_post()` had returned it, so every entry stored `[gif-video id='']`. The ID is now generated first and the correct shortcode is saved.
+- **The fallback never worked** — the footer script looked for element IDs the shortcode never rendered, and it ran on every page. It's replaced by a properly scoped script that's only loaded where a shortcode appears and that actually swaps to the GIF when the WebM fails (handling both `<source>` and codec errors).
+- **Delete was a CSRF risk** — entries were removed via an unprotected `GET` link. Deletes (and the add/edit form) are now nonce-protected with capability checks.
+
+Also added: an **Edit** action (1.0 was add/delete only), optional links/dimensions, `loading="lazy"` + `playsinline`, output escaping throughout, and a clean uninstall.
+
+## License
+
+GPLv2 or later — see [LICENSE](LICENSE).
+
+**Author:** [Finland93](https://github.com/Finland93)
